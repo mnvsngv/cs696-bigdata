@@ -3,6 +3,7 @@ def run_on_aws(input_file, output_dir, spark_session):
     """
 
     import os
+    import math
     import pyspark.sql.functions as F
 
     from pyspark.sql.types import StructType
@@ -49,7 +50,6 @@ def run_on_aws(input_file, output_dir, spark_session):
 
     # Problem 1: Number of donations for each campaign
     df.select(['CMTE_ID', 'TRANSACTION_AMT']) \
-        .where(df['CMTE_ID'].isin(list(campaign_ids.keys()))) \
         .groupby(df['CMTE_ID']) \
         .count() \
         .coalesce(1) \
@@ -57,7 +57,6 @@ def run_on_aws(input_file, output_dir, spark_session):
 
     # Problem 2: Total amount of donations for each campaign
     df.select(['CMTE_ID', 'TRANSACTION_AMT']) \
-        .where(df['CMTE_ID'].isin(list(campaign_ids.keys()))) \
         .groupby(df['CMTE_ID']) \
         .sum() \
         .coalesce(1) \
@@ -65,7 +64,6 @@ def run_on_aws(input_file, output_dir, spark_session):
 
     # Problem 3: Percentage of small contributors for each campaign
     df.select(['CMTE_ID', 'TRANSACTION_AMT', 'ENTITY_TP']) \
-        .where(df['CMTE_ID'].isin(list(campaign_ids.keys()))) \
         .groupby(df['CMTE_ID'], df['ENTITY_TP']) \
         .sum() \
         .withColumn('percent',
@@ -76,8 +74,11 @@ def run_on_aws(input_file, output_dir, spark_session):
         .write.format('csv').save(os.path.join(output_dir, 'problem_3'))
 
     # Problem 4: Histogram data for each campaign
-    step = 10000
     max_val = int(df.select(F.max(df['TRANSACTION_AMT']).alias('MAX')).collect()[0].MAX)
+    max_exp = int(math.ceil(math.log10(max_val)))
+    split_list = [10**i for i in range(0, max_exp+1)]
+    print(split_list)
+    
     query = df.select(['CMTE_ID', 'TRANSACTION_AMT']) \
         .where(df['CMTE_ID'].isin(list(campaign_ids.keys()))) \
         .where(df['TRANSACTION_AMT'] > 0)
@@ -89,7 +90,7 @@ def run_on_aws(input_file, output_dir, spark_session):
     df_bucketed = spark_session.createDataFrame([], schema)
 
     for campaign_id in campaign_ids.keys():
-        bucketizer = Bucketizer(splits=range(0, max_val+1, step), inputCol="TRANSACTION_AMT", outputCol="buckets")
+        bucketizer = Bucketizer(splits=split_list, inputCol="TRANSACTION_AMT", outputCol="buckets")
         df_to_append = bucketizer.transform(query.where(query['CMTE_ID'] == campaign_id))
         df_bucketed = df_bucketed.union(df_to_append)
     
