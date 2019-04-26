@@ -43,19 +43,24 @@ def run_on_aws(input_file, output_dir, spark_session):
                     'C00580100': 'DONALD J. TRUMP FOR PRESIDENT, INC'}
 
     df = spark_session.read.csv(input_file, schema=schema, sep='|')
+    
     # Convert date string to Date Type
     df = df.withColumn("TRANSACTION_DT", F.to_date(df["TRANSACTION_DT"],"mmddyyyy"))
     df = df.select("*") \
             .where(df['CMTE_ID'].isin(list(campaign_ids.keys()))) \
+    
 
     # Problem 1: Number of donations for each campaign
+    # Filter out all negative valued transactions, as we just want to count how many donations are there
     df.select(['CMTE_ID', 'TRANSACTION_AMT']) \
+        .where(df['TRANSACTION_AMT'] > 0) \
         .groupby(df['CMTE_ID']) \
         .count() \
         .coalesce(1) \
         .write.format('csv').save(os.path.join(output_dir, 'problem_1'))
 
     # Problem 2: Total amount of donations for each campaign
+    # Negative transaction amounts (aka refunds) will cancel out so no need to filter out anything
     df.select(['CMTE_ID', 'TRANSACTION_AMT']) \
         .groupby(df['CMTE_ID']) \
         .sum() \
@@ -63,23 +68,31 @@ def run_on_aws(input_file, output_dir, spark_session):
         .write.format('csv').save(os.path.join(output_dir, 'problem_2'))
 
     # Problem 3: Percentage of small contributors for each campaign
-    df.select(['CMTE_ID', 'TRANSACTION_AMT', 'ENTITY_TP']) \
-        .groupby(df['CMTE_ID'], df['ENTITY_TP']) \
+    df.select(['CMTE_ID', 'TRANSACTION_AMT', 'NAME']) \
+        .groupby(df['CMTE_ID'], df['NAME']) \
+        .sum() \
+        .where(F.col('sum(TRANSACTION_AMT)') > 0) \
+        .withColumn('small',
+                    F.when(F.col('sum(TRANSACTION_AMT)') < 200, 1).otherwise(0)
+                   ) \
+        .withColumn('total',
+                    F.lit(1)
+                   ) \
+        .groupby(df['CMTE_ID']) \
         .sum() \
         .withColumn('percent',
-                    F.col('sum(TRANSACTION_AMT)')*100/F.sum('sum(TRANSACTION_AMT)')
-                        .over(Window.partitionBy())
+                    F.col('sum(small)')*100/F.col('sum(total)')
                    ) \
         .coalesce(1) \
         .write.format('csv').save(os.path.join(output_dir, 'problem_3'))
 
     # Problem 4: Histogram data for each campaign
+    # Find out the max valued donation and create a log scale up to that
     max_val = int(df.select(F.max(df['TRANSACTION_AMT']).alias('MAX')).collect()[0].MAX)
     max_exp = int(math.ceil(math.log10(max_val)))
     split_list = [10**i for i in range(0, max_exp+1)]
-    print(split_list)
     
-    query = df.select(['CMTE_ID', 'TRANSACTION_AMT']) \
+    base_df = df.select(['CMTE_ID', 'TRANSACTION_AMT']) \
         .where(df['CMTE_ID'].isin(list(campaign_ids.keys()))) \
         .where(df['TRANSACTION_AMT'] > 0)
     
@@ -91,7 +104,7 @@ def run_on_aws(input_file, output_dir, spark_session):
 
     for campaign_id in campaign_ids.keys():
         bucketizer = Bucketizer(splits=split_list, inputCol="TRANSACTION_AMT", outputCol="buckets")
-        df_to_append = bucketizer.transform(query.where(query['CMTE_ID'] == campaign_id))
+        df_to_append = bucketizer.transform(base_df.where(base_df['CMTE_ID'] == campaign_id))
         df_bucketed = df_bucketed.union(df_to_append)
     
     df_bucketed.groupby(['CMTE_ID', 'buckets']) \
